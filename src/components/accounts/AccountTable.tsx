@@ -43,8 +43,8 @@ import {
     Check,
     Clock,
     Bot,
-    Repeat2,
-    Terminal,
+    
+    
 } from 'lucide-react';
 import { Account } from '../../types/account';
 import { useTranslation } from 'react-i18next';
@@ -130,35 +130,13 @@ interface AccountRowContentProps {
 // ============================================================================
 
 const MODEL_GROUPS = {
-    CLAUDE: [
-        'claude-opus-4-6-thinking',
-        'claude'
-    ],
-    GEMINI_PRO: [
-        'gemini-3.1-pro-high',
-        'gemini-3.1-pro-low',
-        'gemini-3.1-pro-preview',
-        'gemini-3-pro-high',
-        'gemini-3-pro-low',
-        'gemini-3-pro-preview'
-    ],
-    GEMINI_FLASH: [
-        'gemini-3-flash'
+    GLM: [
+        'glm-5.2',
+        'glm-5-turbo'
     ]
 };
 
-const MODEL_ID_ALIASES: Record<string, string[]> = {
-    'gemini-3-pro-high': ['gemini-3-pro-high', 'gemini-3.1-pro-high'],
-    'gemini-3-pro-low': ['gemini-3-pro-low', 'gemini-3.1-pro-low'],
-    'gemini-3-pro-preview': ['gemini-3-pro-preview', 'gemini-3.1-pro-preview'],
-    'gemini-3.1-pro-high': ['gemini-3.1-pro-high', 'gemini-3-pro-high'],
-    'gemini-3.1-pro-low': ['gemini-3.1-pro-low', 'gemini-3-pro-low'],
-    'gemini-3.1-pro-preview': ['gemini-3.1-pro-preview', 'gemini-3-pro-preview'],
-};
-
-function getModelAliases(modelId: string): string[] {
-    return MODEL_ID_ALIASES[modelId] || [modelId];
-}
+// Removed MODEL_ID_ALIASES as they are no longer needed
 
 function isModelProtected(protectedModels: string[] | undefined, modelName: string): boolean {
     if (!protectedModels || protectedModels.length === 0) return false;
@@ -170,23 +148,10 @@ function isModelProtected(protectedModels: string[] | undefined, modelName: stri
     };
 
     // UI Column Keys Mapping (for backward compatibility with hardcoded UI calls)
-    if (lowerName === 'gemini-pro') return isGroupProtected(MODEL_GROUPS.GEMINI_PRO);
-    if (lowerName === 'gemini-flash') return isGroupProtected(MODEL_GROUPS.GEMINI_FLASH);
-    if (lowerName === 'claude-sonnet') return isGroupProtected(MODEL_GROUPS.CLAUDE);
+    if (lowerName === 'glm') return isGroupProtected(MODEL_GROUPS.GLM);
 
-    // 1. Gemini Pro Group
-    if (MODEL_GROUPS.GEMINI_PRO.some(m => lowerName === m)) {
-        return isGroupProtected(MODEL_GROUPS.GEMINI_PRO);
-    }
-
-    // 2. Claude Group
-    if (MODEL_GROUPS.CLAUDE.some(m => lowerName === m)) {
-        return isGroupProtected(MODEL_GROUPS.CLAUDE);
-    }
-
-    // 3. Gemini Flash Group
-    if (MODEL_GROUPS.GEMINI_FLASH.some(m => lowerName === m)) {
-        return isGroupProtected(MODEL_GROUPS.GEMINI_FLASH);
+    if (MODEL_GROUPS.GLM.some(m => lowerName === m)) {
+        return isGroupProtected(MODEL_GROUPS.GLM);
     }
 
     // 兜底直接检查 (Strict check for exact match or normalized ID)
@@ -359,7 +324,7 @@ function AccountRowContent({
                 };
             })
             : pinnedModels.map(modelId => {
-                const m = account.quota?.models.find(m => m.name === modelId || getModelAliases(modelId).includes(m.name.toLowerCase()));
+                const m = account.quota?.models.find(m => m.name === modelId || m.name.toLowerCase() === modelId);
                 const config = MODEL_CONFIG[modelId];
                 if (!config && !m) return null; // Safe guard for unknown models that aren't fetched
                 const label = m?.display_name || (config?.i18nKey ? t(config.i18nKey) : (config?.shortLabel || config?.label || modelId));
@@ -376,7 +341,7 @@ function AccountRowContent({
 
             if (isHiddenThinking) return false;
 
-            // 基于标签去重 (例如 G3.1 Pro 只显示一次)
+            // 基于标签去重 (例如 GLM 5.2 只显示一次)
             // 优先显示有配额数据的 ID
             const labelKey = `${m.label}-${m.protectedKey}`;
             if (uniqueLabels.has(labelKey)) {
@@ -618,27 +583,13 @@ function AccountRowContent({
                     <button
                         className={`p-1.5 text-gray-500 dark:text-gray-400 rounded-lg transition-all ${(isSwitching || isDisabled) ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 dark:text-blue-400 cursor-not-allowed' : 'hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30'}`}
                         onClick={(e) => { e.stopPropagation(); onSwitch(); }}
-                        title={isDisabled ? t('accounts.disabled_tooltip') : (isSwitching ? t('common.loading') : t('accounts.switch_to_classic', '切换到 Antigravity (经典版)'))}
+                        title={isDisabled ? t('accounts.disabled_tooltip') : (isSwitching ? t('common.loading') : t('accounts.switch_session', 'Переключить сессию в Z Code'))}
                         disabled={isSwitching || isDisabled}
                     >
                         <ArrowRightLeft className={`w-3.5 h-3.5 ${isSwitching ? 'animate-spin' : ''}`} />
                     </button>
-                    <button
-                        className={`p-1.5 text-gray-500 dark:text-gray-400 rounded-lg transition-all ${(isSwitching || isDisabled) ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 dark:text-blue-400 cursor-not-allowed' : 'hover:text-sky-600 dark:hover:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-900/30'}`}
-                        onClick={(e) => { e.stopPropagation(); onSwitch('ide'); }}
-                        title={isDisabled ? t('accounts.disabled_tooltip') : (isSwitching ? t('common.loading') : t('accounts.switch_to_ide', '切换到 Antigravity IDE'))}
-                        disabled={isSwitching || isDisabled}
-                    >
-                        <Repeat2 className={`w-3.5 h-3.5 ${isSwitching ? 'animate-spin' : ''}`} />
-                    </button>
-                    <button
-                        className={`p-1.5 text-gray-500 dark:text-gray-400 rounded-lg transition-all ${(isSwitching || isDisabled) ? 'bg-blue-50 dark:bg-blue-900/10 text-blue-600 dark:text-blue-400 cursor-not-allowed' : 'hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/30'}`}
-                        onClick={(e) => { e.stopPropagation(); onSwitch('agy'); }}
-                        title={isDisabled ? t('accounts.disabled_tooltip') : (isSwitching ? t('common.loading') : t('accounts.switch_to_agy', '切换到 Antigravity CLI (agy)'))}
-                        disabled={isSwitching || isDisabled}
-                    >
-                        <Terminal className={`w-3.5 h-3.5 ${isSwitching ? 'animate-spin' : ''}`} />
-                    </button>
+                    
+                    
                     {onWarmup && (
                         <button
                             className={`p-1.5 text-gray-500 dark:text-gray-400 rounded-lg transition-all ${(isRefreshing || isDisabled) ? 'bg-orange-50 dark:bg-orange-900/10 text-orange-600 dark:text-orange-400 cursor-not-allowed' : 'hover:text-orange-500 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/30'}`}

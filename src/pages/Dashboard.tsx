@@ -34,48 +34,52 @@ function Dashboard() {
 
     // 计算统计数据
     const stats = useMemo(() => {
-        const getGeminiProQuota = (a: Account) =>
-            (a.quota?.models || [])
-                .filter(m =>
-                    m.name.toLowerCase() === 'gemini-3-pro-high'
-                    || m.name.toLowerCase() === 'gemini-3-pro-low'
-                    || m.name.toLowerCase() === 'gemini-3.1-pro-high'
-                    || m.name.toLowerCase() === 'gemini-3.1-pro-low'
-                )
-                .reduce((best, model) => Math.max(best, model.percentage || 0), 0);
+        const getGlm52Quota = (a: Account) => {
+            const m = (a.quota?.models || []).find(m => m.name === 'GLM-5.2');
+            return m !== undefined ? m.percentage : null;
+        };
 
-        const geminiQuotas = accounts
-            .map(a => getGeminiProQuota(a))
-            .filter(q => q > 0);
+        const getGlmTurboQuota = (a: Account) => {
+            const m = (a.quota?.models || []).find(m => m.name === 'GLM-5-Turbo');
+            return m !== undefined ? m.percentage : null;
+        };
 
-        const geminiImageQuotas = accounts
-            .map(a => a.quota?.models.find(m =>
-                m.name.toLowerCase() === 'gemini-3.1-flash-image' ||
-                m.name.toLowerCase() === 'gemini-3-pro-image'
-            )?.percentage || 0)
-            .filter(q => q > 0);
+        const getMcpQuota = (a: Account) => {
+            const group = a.quota?.quota_groups?.[0];
+            const bucket = group?.buckets?.find(b => b.bucket_id === 'glm-mcp');
+            return bucket !== undefined ? Math.round(bucket.remaining_fraction * 100) : null;
+        };
 
-        const claudeQuotas = accounts
-            .map(a => a.quota?.models.find(m => m.name.toLowerCase() === 'claude-sonnet-4-6' || m.name.toLowerCase() === 'claude-sonnet-4-5')?.percentage || 0)
-            .filter(q => q > 0);
+        const quotasGlm52 = accounts
+            .map(a => getGlm52Quota(a))
+            .filter((q): q is number => q !== null);
+
+        const quotasGlmTurbo = accounts
+            .map(a => getGlmTurboQuota(a))
+            .filter((q): q is number => q !== null);
+
+        const quotasMcp = accounts
+            .map(a => getMcpQuota(a))
+            .filter((q): q is number => q !== null);
 
         const lowQuotaCount = accounts.filter(a => {
             if (a.quota?.is_forbidden) return false;
-            const gemini = getGeminiProQuota(a);
-            const claude = a.quota?.models.find(m => m.name.toLowerCase() === 'claude-sonnet-4-6' || m.name.toLowerCase() === 'claude-sonnet-4-5')?.percentage || 0;
-            return gemini < 20 || claude < 20;
+            const q5h = getGlm52Quota(a);
+            const qWeekly = getGlmTurboQuota(a);
+            if (q5h === null || qWeekly === null) return false;
+            return q5h < 20 || qWeekly < 20;
         }).length;
 
         return {
             total: accounts.length,
-            avgGemini: geminiQuotas.length > 0
-                ? Math.round(geminiQuotas.reduce((a, b) => a + b, 0) / geminiQuotas.length)
+            avgGlm52: quotasGlm52.length > 0
+                ? Math.round(quotasGlm52.reduce((a, b) => a + b, 0) / quotasGlm52.length)
                 : 0,
-            avgGeminiImage: geminiImageQuotas.length > 0
-                ? Math.round(geminiImageQuotas.reduce((a, b) => a + b, 0) / geminiImageQuotas.length)
+            avgGlmTurbo: quotasGlmTurbo.length > 0
+                ? Math.round(quotasGlmTurbo.reduce((a, b) => a + b, 0) / quotasGlmTurbo.length)
                 : 0,
-            avgClaude: claudeQuotas.length > 0
-                ? Math.round(claudeQuotas.reduce((a, b) => a + b, 0) / claudeQuotas.length)
+            avgMcp: quotasMcp.length > 0
+                ? Math.round(quotasMcp.reduce((a, b) => a + b, 0) / quotasMcp.length)
                 : 0,
             lowQuota: lowQuotaCount,
         };
@@ -226,52 +230,52 @@ function Dashboard() {
                         <div className="text-xs text-gray-500 dark:text-gray-400">{t('dashboard.total_accounts')}</div>
                     </div>
 
-                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200 hover:border-blue-200/50 transition-all">
                         <div className="flex items-center justify-between mb-2">
                             <div className="p-1.5 bg-green-50 dark:bg-green-900/20 rounded-md">
                                 <Sparkles className="w-4 h-4 text-green-500 dark:text-green-400" />
                             </div>
                         </div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgGemini}%</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">{t('dashboard.avg_gemini')}</div>
-                        {stats.avgGemini > 0 && (
-                            <div className={`text-[10px] mt-1 ${stats.avgGemini >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
-                                {stats.avgGemini >= 50 ? t('dashboard.quota_sufficient') : t('dashboard.quota_low')}
+                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgGlm52}%</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">Avg GLM-5.2 Limit</div>
+                        {stats.avgGlm52 > 0 && (
+                            <div className={`text-[10px] mt-1 ${stats.avgGlm52 >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
+                                {stats.avgGlm52 >= 50 ? t('dashboard.quota_sufficient', 'Sufficient') : t('dashboard.quota_low', 'Low Quota')}
                             </div>
                         )}
                     </div>
 
-                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200 hover:border-blue-200/50 transition-all">
                         <div className="flex items-center justify-between mb-2">
                             <div className="p-1.5 bg-purple-50 dark:bg-purple-900/20 rounded-md">
                                 <Sparkles className="w-4 h-4 text-purple-500 dark:text-purple-400" />
                             </div>
                         </div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgGeminiImage}%</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">{t('dashboard.avg_gemini_image')}</div>
-                        {stats.avgGeminiImage > 0 && (
-                            <div className={`text-[10px] mt-1 ${stats.avgGeminiImage >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
-                                {stats.avgGeminiImage >= 50 ? t('dashboard.quota_sufficient') : t('dashboard.quota_low')}
+                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgGlmTurbo}%</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">Avg GLM-5-Turbo Limit</div>
+                        {stats.avgGlmTurbo > 0 && (
+                            <div className={`text-[10px] mt-1 ${stats.avgGlmTurbo >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
+                                {stats.avgGlmTurbo >= 50 ? t('dashboard.quota_sufficient', 'Sufficient') : t('dashboard.quota_low', 'Low Quota')}
                             </div>
                         )}
                     </div>
 
-                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200 hover:border-blue-200/50 transition-all">
                         <div className="flex items-center justify-between mb-2">
                             <div className="p-1.5 bg-cyan-50 dark:bg-cyan-900/20 rounded-md">
                                 <Bot className="w-4 h-4 text-cyan-500 dark:text-cyan-400" />
                             </div>
                         </div>
-                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgClaude}%</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">{t('dashboard.avg_claude')}</div>
-                        {stats.avgClaude > 0 && (
-                            <div className={`text-[10px] mt-1 ${stats.avgClaude >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
-                                {stats.avgClaude >= 50 ? t('dashboard.quota_sufficient') : t('dashboard.quota_low')}
+                        <div className="text-2xl font-bold text-gray-900 dark:text-base-content mb-0.5">{stats.avgMcp}%</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">Avg MCP Tool Limit</div>
+                        {stats.avgMcp > 0 && (
+                            <div className={`text-[10px] mt-1 ${stats.avgMcp >= 50 ? 'text-green-600 dark:text-green-400' : 'text-orange-600 dark:text-orange-400'}`}>
+                                {stats.avgMcp >= 50 ? t('dashboard.quota_sufficient', 'Sufficient') : t('dashboard.quota_low', 'Low Quota')}
                             </div>
                         )}
                     </div>
 
-                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200">
+                    <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200 hover:border-blue-200/50 transition-all">
                         <div className="flex items-center justify-between mb-2">
                             <div className="p-1.5 bg-orange-50 dark:bg-orange-900/20 rounded-md">
                                 <AlertTriangle className="w-4 h-4 text-orange-500 dark:text-orange-400" />

@@ -34,125 +34,26 @@ impl SystemIntegration for DesktopIntegration {
             account.email, target_ide
         ));
 
-        if target_ide == Some("agy") {
-            write_to_system_keyring(account)?;
-
-            if let Ok(storage_path) = device::get_storage_path(target_ide) {
-                if let Some(ref profile) = account.device_profile {
-                    let _ = device::write_profile(&storage_path, profile);
-                }
-            }
-
-            let is_running = process::is_process_running_by_name("agy");
-            let msg = if is_running {
-                format!(
-                    "Account {} activated. Agy is running, token will be picked up automatically.",
-                    account.email
-                )
-            } else {
-                format!(
-                    "Account {} activated. Token is ready for your next CLI command.",
-                    account.email
-                )
-            };
-            self.show_notification("Antigravity CLI", &msg);
-            self.update_tray();
-
-            return Ok(());
-        }
-
-        // 1. 先关闭外部正在运行的进程（无论是原生还是IDE，先安全关闭，避免文件或凭据冲突）
-        if process::is_antigravity_running(target_ide) {
-            process::close_antigravity(20, target_ide)?;
-        }
-
-        // 2. 智能决策：是否使用最新的系统 Keychain 凭据管理器方式存储 Token
-        let is_ide = target_ide == Some("ide");
-        let mut use_keyring = false;
-
-        if !is_ide {
-            // 经典原生版：自动探测版本号
-            match version::get_antigravity_version(target_ide) {
-                Ok(ver) => {
-                    // 如果版本号 >= 2.0.0
-                    if version::compare_version(&ver.short_version, "2.0.0")
-                        != std::cmp::Ordering::Less
-                    {
-                        use_keyring = true;
-                        crate::modules::logger::log_info(&format!(
-                            "[Desktop] Detected Antigravity version {} >= 2.0.0, using system Keyring.",
-                            ver.short_version
-                        ));
-                    } else {
-                        crate::modules::logger::log_info(&format!(
-                            "[Desktop] Detected Antigravity version {} < 2.0.0, falling back to legacy SQLite injection.",
-                            ver.short_version
-                        ));
-                    }
-                }
-                Err(e) => {
-                    // 如果探测失败，为防止对最新版由于没有 storage.json 造成报错阻断，默认作为新凭据注入
-                    use_keyring = true;
-                    crate::modules::logger::log_warn(&format!(
-                        "[Desktop] Failed to detect Antigravity version ({}), defaulting to system Keyring for robustness.",
-                        e
-                    ));
-                }
-            }
-        }
-
-        if use_keyring {
-            // ================== 最新版 Antigravity 原生应用逻辑 (>= 2.0.0) ==================
-            // 2.1 写入系统 Keychain/Keyring
-            write_to_system_keyring(account)?;
-
-            // 2.2 原生应用可能没有 storage.json，但如果有的话，我们也可以尝试安全地写入设备 Profile，以兼容指纹信息
-            if let Ok(storage_path) = device::get_storage_path(target_ide) {
-                if let Some(ref profile) = account.device_profile {
-                    let _ = device::write_profile(&storage_path, profile);
-                }
-            }
+        // Sync credentials to ZCode configuration file
+        if let Err(e) = sync_account_to_zcode(account) {
+            crate::modules::logger::log_warn(&format!("[Desktop] Failed to sync credentials to ZCode: {}", e));
         } else {
-            // ================== 原有 Antigravity 旧版或定制 IDE 逻辑 (< 2.0.0) ==================
-            // 2.1 获取存储路径
-            let storage_path = device::get_storage_path(target_ide)?;
-
-            // 2.2 写入设备 Profile
-            if let Some(ref profile) = account.device_profile {
-                device::write_profile(&storage_path, profile)?;
+            // If ZCode is running, restart it to apply the new session
+            if process::is_process_running_by_name("ZCode") {
+                crate::modules::logger::log_info("[Desktop] ZCode is running, restarting it to apply new session...");
+                let _ = Command::new("killall").arg("ZCode").output();
+                std::thread::sleep(std::time::Duration::from_millis(800));
+            } else {
+                crate::modules::logger::log_info("[Desktop] ZCode is not running, launching it to apply new session...");
             }
-
-            // 2.3 数据库处理与 Token 注入
-            let db_path = db::get_db_path(target_ide)?;
-            if db_path.exists() {
-                let backup_path = db_path.with_extension("vscdb.backup");
-                let _ = fs::copy(&db_path, &backup_path);
-            }
-
-            db::inject_token(
-                &db_path,
-                &account.token.access_token,
-                &account.token.refresh_token,
-                account.token.expiry_timestamp,
-                &account.email,
-                account.token.is_gcp_tos,
-                account.token.project_id.as_deref(),
-                account.token.id_token.as_deref(),
-                account.token.oauth_client_key.as_deref(),
-                target_ide,
-            )?;
-
-            // 2.4 同步 Service Machine ID 到数据库
-            if let Some(ref profile) = account.device_profile {
-                let _ = db::write_service_machine_id(&db_path, &profile.mac_machine_id);
-            }
+            let _ = Command::new("open").args(["-a", "ZCode"]).output();
+            
+            let msg = format!("Account {} activated and synced to ZCode.", account.email);
+            self.show_notification("Z Manager", &msg);
         }
-
-        // 3. 重启外部进程
-        process::start_antigravity(target_ide)?;
 
         // 4. 更新托盘
-        let _ = crate::modules::tray::update_tray_menus(&self.app_handle);
+        self.update_tray();
 
         Ok(())
     }
@@ -476,4 +377,103 @@ impl SystemIntegration for SystemManager {
     fn show_notification(&self, title: &str, body: &str) {
         self.show_notification(title, body);
     }
+}
+
+fn encrypt_zcode_string(plaintext: &str) -> Result<String, String> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+    use rand::{rngs::OsRng, RngCore};
+    use base64::{engine::general_purpose, Engine as _};
+    use sha2::Digest;
+    
+    // 1. Derive key
+    let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+    let home_dir_str = home_dir.to_string_lossy().to_string();
+    
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+        
+    let fallback_secret = format!("zcode-credential-fallback:darwin:{}:{}", home_dir_str, username);
+    let mut key_bytes = [0u8; 32];
+    let hash = sha2::Sha256::digest(fallback_secret.as_bytes());
+    key_bytes.copy_from_slice(&hash);
+    
+    // 2. Cipher
+    let cipher = Aes256Gcm::new(&key_bytes.into());
+    
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    
+    let ciphertext_with_tag = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+        
+    if ciphertext_with_tag.len() < 16 {
+        return Err("Encryption yielded invalid ciphertext length".to_string());
+    }
+    
+    let actual_ciphertext = &ciphertext_with_tag[..ciphertext_with_tag.len() - 16];
+    let auth_tag = &ciphertext_with_tag[ciphertext_with_tag.len() - 16..];
+    
+    let encoded_iv = general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes);
+    let encoded_tag = general_purpose::URL_SAFE_NO_PAD.encode(auth_tag);
+    let encoded_ciphertext = general_purpose::URL_SAFE_NO_PAD.encode(actual_ciphertext);
+    
+    Ok(format!("enc:v1:{}.{}.{}", encoded_iv, encoded_tag, encoded_ciphertext))
+}
+
+pub fn sync_account_to_zcode(account: &crate::models::Account) -> Result<(), String> {
+    let access_token = &account.token.access_token;
+    let zcode_jwt_token = account.token.id_token.as_ref().unwrap_or(&account.token.access_token);
+    
+    let enc_access_token = encrypt_zcode_string(access_token)?;
+    let enc_zcode_jwt_token = encrypt_zcode_string(zcode_jwt_token)?;
+    
+    let user_id = &account.id;
+    let email = &account.email;
+    let name = email.split('@').next().unwrap_or("user");
+    
+    let user_info_json = serde_json::json!({
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "avatar": ""
+    });
+    let user_info_str = serde_json::to_string(&user_info_json)
+        .map_err(|e| format!("Failed to serialize user info: {}", e))?;
+        
+    let enc_user_info = encrypt_zcode_string(&user_info_str)?;
+    let enc_active_provider = encrypt_zcode_string("zai")?;
+    
+    let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+    let zcode_dir = home_dir.join(".zcode").join("v2");
+    let credentials_path = zcode_dir.join("credentials.json");
+    
+    let _ = std::fs::create_dir_all(&zcode_dir);
+    
+    let mut creds_map: serde_json::Map<String, serde_json::Value> = if credentials_path.exists() {
+        let file_content = std::fs::read_to_string(&credentials_path)
+            .map_err(|e| format!("Failed to read ZCode credentials: {}", e))?;
+        serde_json::from_str(&file_content).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    
+    creds_map.insert("oauth:zai:access_token".to_string(), serde_json::Value::String(enc_access_token));
+    creds_map.insert("zcodejwttoken".to_string(), serde_json::Value::String(enc_zcode_jwt_token));
+    creds_map.insert("oauth:zai:user_info".to_string(), serde_json::Value::String(enc_user_info));
+    creds_map.insert("oauth:active_provider".to_string(), serde_json::Value::String(enc_active_provider));
+    
+    let updated_content = serde_json::to_string_pretty(&creds_map)
+        .map_err(|e| format!("Failed to serialize ZCode credentials: {}", e))?;
+    std::fs::write(&credentials_path, updated_content)
+        .map_err(|e| format!("Failed to write ZCode credentials: {}", e))?;
+        
+    crate::modules::logger::log_info(&format!("Successfully synced active Z.ai session to ZCode at {}", credentials_path.display()));
+    
+    Ok(())
 }

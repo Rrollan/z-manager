@@ -1,8 +1,8 @@
 #!/bin/bash
 
-APP_PATH="/Applications/Antigravity Tools.app"
+APP_PATH="/Applications/Z Manager.app"
 
-echo "🛠️  修复 'Antigravity Tools' 已损坏问题..."
+echo "🛠️  修复 'Z Manager' 已损坏问题..."
 
 if [ -d "$APP_PATH" ]; then
     echo "📍 找到应用: $APP_PATH"

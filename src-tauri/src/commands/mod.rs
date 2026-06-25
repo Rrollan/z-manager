@@ -51,17 +51,14 @@ pub async fn list_accounts(
 #[tauri::command]
 pub async fn add_account(
     app: tauri::AppHandle,
-    _email: String,
+    email: String,
     refresh_token: String,
 ) -> Result<Account, String> {
     let service = modules::account_service::AccountService::new(
         crate::modules::integration::SystemManager::Desktop(app.clone()),
     );
 
-    let mut account = service.add_account(&refresh_token).await?;
-
-    // 自动刷新配额
-    let _ = internal_refresh_account_quota(&app, &mut account).await;
+    let account = service.add_account(&email, &refresh_token).await?;
 
     // 重载账号池
     let _ = crate::commands::proxy::reload_proxy_accounts(
@@ -519,6 +516,296 @@ pub async fn set_active_oauth_client(client_key: String) -> Result<(), String> {
     crate::modules::oauth::set_active_oauth_client_key(&client_key)
 }
 
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+static PENDING_LABEL: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+#[tauri::command]
+pub async fn start_zai_login(
+    app_handle: tauri::AppHandle,
+    label: Option<String>,
+) -> Result<(), String> {
+    modules::logger::log_info("Starting Z.ai Login Flow with Network Interceptor...");
+    
+    if let Ok(mut pending) = PENDING_LABEL.lock() {
+        *pending = label;
+    }
+
+    let zai_check_js = r#"
+        (function() {
+            // 1. Intercept fetch headers (modern single-page app requests)
+            try {
+                const originalFetch = window.fetch;
+                window.fetch = async function(resource, init) {
+                    if (init && init.headers) {
+                        let headers = {};
+                        if (init.headers instanceof Headers) {
+                            for (let [k, v] of init.headers.entries()) {
+                                headers[k] = v;
+                            }
+                        } else if (Array.isArray(init.headers)) {
+                            for (let [k, v] of init.headers) {
+                                headers[k] = v;
+                            }
+                        } else {
+                            headers = init.headers;
+                        }
+                        
+                        for (let k in headers) {
+                            if (k.toLowerCase() === 'authorization') {
+                                let authVal = headers[k];
+                                if (authVal && typeof authVal === 'string') {
+                                    authVal = authVal.trim();
+                                    if (authVal.startsWith('Bearer ')) {
+                                        authVal = authVal.substring(7).trim();
+                                    }
+                                    if (authVal.length > 20) {
+                                        if (window.__TAURI_IPC__) {
+                                            window.__TAURI_IPC__({
+                                                cmd: "save_extracted_token",
+                                                token: authVal,
+                                                callback: 0,
+                                                error: 1
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return originalFetch.apply(this, arguments);
+                };
+            } catch(e) {
+                console.error("Fetch intercept error:", e);
+            }
+
+            // 2. Intercept XMLHttpRequest headers (legacy request fallback)
+            try {
+                const originalOpen = XMLHttpRequest.prototype.open;
+                const originalSend = XMLHttpRequest.prototype.send;
+                const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+                
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    this._url = url;
+                    this._headers = {};
+                    return originalOpen.apply(this, arguments);
+                };
+                
+                XMLHttpRequest.prototype.setRequestHeader = function(header, value) {
+                    this._headers[header] = value;
+                    if (header.toLowerCase() === 'authorization') {
+                        let authVal = value;
+                        if (authVal && typeof authVal === 'string') {
+                            authVal = authVal.trim();
+                            if (authVal.startsWith('Bearer ')) {
+                                authVal = authVal.substring(7).trim();
+                            }
+                            if (authVal.length > 20) {
+                                if (window.__TAURI_IPC__) {
+                                    window.__TAURI_IPC__({
+                                        cmd: "save_extracted_token",
+                                        token: authVal,
+                                        callback: 0,
+                                        error: 1
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    return originalSetRequestHeader.apply(this, arguments);
+                };
+            } catch(e) {
+                console.error("XHR intercept error:", e);
+            }
+
+            // 3. Regular polling fallback (localStorage, sessionStorage, cookies)
+            function isToken(val) {
+                if (!val || typeof val !== 'string') return false;
+                val = val.trim();
+                if (val.startsWith('Bearer ')) {
+                    val = val.substring(7);
+                }
+                if (val.split('.').length === 3 && val.length > 50) {
+                    return true;
+                }
+                return false;
+            }
+
+            function checkAndSend() {
+                let token = null;
+
+                // localStorage
+                try {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        const val = localStorage.getItem(key);
+                        if (isToken(val)) { token = val; break; }
+                        if ((key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')) && val && val.length > 20) {
+                            token = val;
+                            break;
+                        }
+                    }
+                } catch(e) {}
+
+                // sessionStorage
+                if (!token) {
+                    try {
+                        for (let i = 0; i < sessionStorage.length; i++) {
+                            const key = sessionStorage.key(i);
+                            const val = sessionStorage.getItem(key);
+                            if (isToken(val)) { token = val; break; }
+                            if ((key.toLowerCase().includes('token') || key.toLowerCase().includes('auth')) && val && val.length > 20) {
+                                token = val;
+                                break;
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                // cookies
+                if (!token) {
+                    try {
+                        const cookies = document.cookie.split(';');
+                        for (let cookie of cookies) {
+                            const parts = cookie.split('=');
+                            const name = parts[0].trim();
+                            const val = parts[1] ? parts[1].trim() : '';
+                            if (isToken(val)) { token = val; break; }
+                            if ((name.toLowerCase().includes('token') || name.toLowerCase().includes('auth')) && val && val.length > 20) {
+                                token = val;
+                                break;
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                if (token) {
+                    let cleanToken = token.trim();
+                    if (cleanToken.startsWith('Bearer ')) {
+                        cleanToken = cleanToken.substring(7).trim();
+                    }
+                    if (window.__TAURI_IPC__) {
+                        window.__TAURI_IPC__({
+                            cmd: "save_extracted_token",
+                            token: cleanToken,
+                            callback: 0,
+                            error: 1
+                        });
+                    }
+                }
+            }
+
+            setInterval(checkAndSend, 1000);
+        })();
+    "#;
+
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let target_url_str = format!(
+        "https://chat.z.ai/api/oauth/authorize?redirect_uri=zcode%3A%2F%2Fzai-auth%2Fcallback&response_type=code&client_id=client_P8X5CMWmlaRO9gyO-KSqtg&state={}",
+        state
+    );
+
+    let target_url = target_url_str.parse::<tauri::Url>()
+        .map_err(|e| format!("Failed to parse Z.ai OAuth URL: {}", e))?;
+
+    let app_handle_clone = app_handle.clone();
+    let window = tauri::WebviewWindowBuilder::new(
+        &app_handle,
+        "zai_login",
+        tauri::WebviewUrl::External(target_url)
+    )
+    .title("Sign in to Z.ai")
+    .initialization_script(zai_check_js)
+    .inner_size(1000.0, 800.0)
+    .resizable(true)
+    .on_navigation(move |url| {
+        let url_str = url.as_str();
+        modules::logger::log_info(&format!("Webview navigating to: {}", url_str));
+        
+        // Intercept custom scheme redirect
+        if url_str.starts_with("zcode://") || url.scheme() == "zcode" {
+            let mut auth_code = None;
+            if let Some(query) = url.query() {
+                for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+                    if k == "code" {
+                        auth_code = Some(v.into_owned());
+                        break;
+                    }
+                }
+            }
+            
+            if auth_code.is_some() {
+                modules::logger::log_info(&format!("Captured ZCode redirect URL from webview: {}", url_str));
+                let app_handle = app_handle_clone.clone();
+                let url_payload = url_str.to_string();
+                tauri::async_runtime::spawn(async move {
+                    let _ = save_extracted_token(app_handle, url_payload).await;
+                });
+            } else {
+                modules::logger::log_warn("Failed to find 'code' parameter in zcode redirect URL.");
+            }
+            
+            // Block navigation because zcode:// is not a loadable web protocol
+            false
+        } else {
+            true
+        }
+    })
+    .build()
+    .map_err(|e| format!("Failed to build Z.ai login webview: {}", e))?;
+
+    let _ = window.show();
+    let _ = window.set_focus();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn save_extracted_token(
+    app_handle: tauri::AppHandle,
+    token: String,
+) -> Result<(), String> {
+    modules::logger::log_info("Token extracted from Z.ai webview, adding account...");
+
+    if let Some(window) = app_handle.get_webview_window("zai_login") {
+        let _ = window.close();
+    }
+
+    let label = if let Ok(pending) = PENDING_LABEL.lock() {
+        pending.clone().unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let service = modules::account_service::AccountService::new(
+        crate::modules::integration::SystemManager::Desktop(app_handle.clone()),
+    );
+
+    let account_res = service.add_account(&label, &token).await;
+
+    match account_res {
+        Ok(mut account) => {
+            let _ = internal_refresh_account_quota(&app_handle, &mut account).await;
+
+            let _ = crate::commands::proxy::reload_proxy_accounts(
+                app_handle.state::<crate::commands::proxy::ProxyServiceState>(),
+            )
+            .await;
+
+            let _ = app_handle.emit("zai-login-success", account.email.clone());
+            modules::logger::log_info(&format!("Successfully added Z.ai account: {}", account.email));
+            Ok(())
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to add Z.ai account: {}", e);
+            let _ = app_handle.emit("zai-login-failure", error_msg.clone());
+            modules::logger::log_error(&error_msg);
+            Err(e)
+        }
+    }
+}
+
 // --- 导入命令 ---
 
 #[tauri::command]
@@ -742,21 +1029,7 @@ pub async fn clear_log_cache() -> Result<(), String> {
     modules::logger::clear_logs()
 }
 
-/// 清理 Antigravity 应用缓存
-/// 用于解决登录失败、版本验证错误等问题
-#[tauri::command]
-pub async fn clear_antigravity_cache() -> Result<modules::cache::ClearResult, String> {
-    modules::cache::clear_antigravity_cache(None)
-}
 
-/// 获取 Antigravity 缓存路径列表（用于预览）
-#[tauri::command]
-pub async fn get_antigravity_cache_paths() -> Result<Vec<String>, String> {
-    Ok(modules::cache::get_existing_cache_paths()
-        .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect())
-}
 
 /// 打开数据目录
 #[tauri::command]
@@ -819,35 +1092,7 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
     window.set_theme(tauri_theme).map_err(|e| e.to_string())
 }
 
-/// 获取 Antigravity 可执行文件路径
-#[tauri::command]
-pub async fn get_antigravity_path(bypass_config: Option<bool>) -> Result<String, String> {
-    // 1. 优先从配置查询 (除非明确要求绕过)
-    if bypass_config != Some(true) {
-        if let Ok(config) = crate::modules::config::load_app_config() {
-            if let Some(path) = config.antigravity_executable {
-                if std::path::Path::new(&path).exists() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
 
-    // 2. 执行实时探测
-    match crate::modules::process::get_antigravity_executable_path(None) {
-        Some(path) => Ok(path.to_string_lossy().to_string()),
-        None => Err("未找到 Antigravity 安装路径".to_string()),
-    }
-}
-
-/// 获取 Antigravity 启动参数
-#[tauri::command]
-pub async fn get_antigravity_args() -> Result<Vec<String>, String> {
-    match crate::modules::process::get_args_from_running_process(None) {
-        Some(args) => Ok(args),
-        None => Err("未找到正在运行的 Antigravity 进程".to_string()),
-    }
-}
 
 /// 检测更新响应结构
 pub use crate::modules::update_checker::UpdateInfo;

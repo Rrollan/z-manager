@@ -424,23 +424,25 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let tray_enabled = window
-                    .app_handle()
-                    .try_state::<AppRuntimeFlags>()
-                    .map(|flags| flags.tray_enabled)
-                    .unwrap_or(true);
+                if window.label() == "main" {
+                    let tray_enabled = window
+                        .app_handle()
+                        .try_state::<AppRuntimeFlags>()
+                        .map(|flags| flags.tray_enabled)
+                        .unwrap_or(true);
 
-                if tray_enabled {
-                    let _ = window.hide();
-                    #[cfg(target_os = "macos")]
-                    {
-                        use tauri::Manager;
-                        window
-                            .app_handle()
-                            .set_activation_policy(tauri::ActivationPolicy::Accessory)
-                            .unwrap_or(());
+                    if tray_enabled {
+                        let _ = window.hide();
+                        #[cfg(target_os = "macos")]
+                        {
+                            use tauri::Manager;
+                            window
+                                .app_handle()
+                                .set_activation_policy(tauri::ActivationPolicy::Accessory)
+                                .unwrap_or(());
+                        }
+                        api.prevent_close();
                     }
-                    api.prevent_close();
                 }
             }
         })
@@ -481,6 +483,8 @@ pub fn run() {
             commands::list_oauth_clients,
             commands::get_active_oauth_client,
             commands::set_active_oauth_client,
+            commands::start_zai_login,
+            commands::save_extracted_token,
             commands::import_v1_accounts,
             commands::import_from_db,
             commands::import_custom_db,
@@ -488,14 +492,10 @@ pub fn run() {
             commands::save_text_file,
             commands::read_text_file,
             commands::clear_log_cache,
-            commands::clear_antigravity_cache,
-            commands::get_antigravity_cache_paths,
             commands::open_data_folder,
             commands::get_data_dir_path,
             commands::show_main_window,
             commands::set_window_theme,
-            commands::get_antigravity_path,
-            commands::get_antigravity_args,
             commands::check_for_updates,
             commands::check_homebrew_installation,
             commands::brew_upgrade_cask,

@@ -54,9 +54,9 @@ export function QuotaItem({ label, percentage, resetTime, isProtected, className
             <div
                 className={cn(
                     "absolute inset-y-0 left-0 transition-all duration-700 ease-out opacity-15 dark:opacity-20",
-                    getBgColorClass(percentage)
+                    getBgColorClass(percentage > 100 ? 100 : percentage)
                 )}
-                style={{ width: `${percentage}%` }}
+                style={{ width: `${Math.min(percentage, 100)}%` }}
             />
 
             {/* Content */}
@@ -80,11 +80,11 @@ export function QuotaItem({ label, percentage, resetTime, isProtected, className
                 </div>
 
                 {/* Percentage */}
-                <span className={cn("w-[28px] text-right font-bold transition-colors flex items-center justify-end gap-0.5 shrink-0", getTextColorClass(percentage))}>
+                <span className={cn("w-[40px] text-right font-bold transition-colors flex items-center justify-end gap-0.5 shrink-0", getTextColorClass(percentage > 100 ? 100 : percentage))}>
                     {isProtected && (
                         <span title={t('accounts.quota_protected')}><Lock className="w-2.5 h-2.5 text-amber-500" /></span>
                     )}
-                    {percentage}%
+                    {percentage > 100 ? (percentage / 1000000) + 'M' : `${percentage}%`}
                 </span>
             </div>
         </div>

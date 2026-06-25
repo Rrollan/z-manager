@@ -647,73 +647,25 @@ pub async fn refresh_access_token(
 
 /// Get user info
 pub async fn get_user_info(
-    access_token: &str,
-    account_id: Option<&str>,
+    _access_token: &str,
+    _account_id: Option<&str>,
 ) -> Result<UserInfo, String> {
-    let client = if let Some(pool) = crate::proxy::proxy_pool::get_global_proxy_pool() {
-        pool.get_effective_client(account_id, 15).await
-    } else {
-        crate::utils::http::get_client()
-    };
-
-    let response = client
-        .get(USERINFO_URL)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(|e| format!("User info request failed: {}", e))?;
-
-    if response.status().is_success() {
-        response
-            .json::<UserInfo>()
-            .await
-            .map_err(|e| format!("User info parsing failed: {}", e))
-    } else {
-        let error_text = response.text().await.unwrap_or_default();
-        Err(format!("Failed to get user info: {}", error_text))
-    }
+    Ok(UserInfo {
+        email: "zcode@z.ai".to_string(),
+        name: Some("Z Code Account".to_string()),
+        given_name: None,
+        family_name: None,
+        picture: None,
+    })
 }
 
 /// Check and refresh Token if needed
 /// Returns the latest access_token
 pub async fn ensure_fresh_token(
     current_token: &crate::models::TokenData,
-    account_id: Option<&str>,
+    _account_id: Option<&str>,
 ) -> Result<crate::models::TokenData, String> {
-    let now = chrono::Local::now().timestamp();
-
-    // Keep enough validity to avoid immediate post-switch refresh failure.
-    if current_token.expiry_timestamp > now + TOKEN_REFRESH_SKEW_SECONDS {
-        return Ok(current_token.clone());
-    }
-
-    // Need to refresh
-    crate::modules::logger::log_info(&format!(
-        "Token expiring soon for account {:?}, refreshing...",
-        account_id
-    ));
-    let response = refresh_access_token_with_client(
-        &current_token.refresh_token,
-        account_id,
-        current_token.oauth_client_key.as_deref(),
-    )
-    .await?;
-
-    let oauth_client_key =
-        normalize_refreshed_oauth_client_key(current_token, response.oauth_client_key.clone());
-
-    // Construct new TokenData
-    Ok(crate::models::TokenData::new(
-        response.access_token,
-        current_token.refresh_token.clone(), // refresh_token may not be returned on refresh
-        response.expires_in,
-        current_token.email.clone(),
-        current_token.project_id.clone(), // Keep original project_id
-        None,                             // session_id will be generated in token_manager
-        current_token.is_gcp_tos,
-        response.id_token.or(current_token.id_token.clone()), // Use new id_token or keep old one
-    )
-    .with_oauth_client_key(oauth_client_key))
+    Ok(current_token.clone())
 }
 
 #[cfg(test)]

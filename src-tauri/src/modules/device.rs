@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const DATA_DIR: &str = ".antigravity_tools";
+const DATA_DIR: &str = ".z_manager";
 const GLOBAL_BASELINE: &str = "device_original.json";
 
 fn get_data_dir() -> Result<PathBuf, String> {

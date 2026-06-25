@@ -158,6 +158,20 @@ pub fn record_usage(
     Ok(())
 }
 
+/// Get the total token usage for a specific account email
+pub fn get_account_total_usage(account_email: &str) -> Result<u64, String> {
+    let conn = connect_db()?;
+    let mut stmt = conn
+        .prepare("SELECT SUM(total_tokens) FROM token_stats_hourly WHERE account_email = ?1")
+        .map_err(|e| e.to_string())?;
+
+    let total: Option<u64> = stmt
+        .query_row([account_email], |row| row.get(0))
+        .ok();
+
+    Ok(total.unwrap_or(0))
+}
+
 /// Get hourly aggregated stats for a time range
 pub fn get_hourly_stats(hours: i64) -> Result<Vec<TokenStatsAggregated>, String> {
     let conn = connect_db()?;

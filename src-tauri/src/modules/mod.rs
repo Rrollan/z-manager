@@ -41,5 +41,20 @@ pub async fn fetch_quota(
     email: &str,
     account_id: Option<&str>,
 ) -> crate::error::AppResult<(models::QuotaData, Option<String>)> {
+    if email.ends_with("(Z.ai)") {
+        // For Z.ai accounts, use the ZCode billing/balance API with id_token
+        // Try to get the id_token from the account file
+        let id_token = if let Some(aid) = account_id {
+            account::load_account(aid)
+                .ok()
+                .and_then(|acc| acc.token.id_token.clone())
+        } else {
+            None
+        };
+        
+        let token_for_api = id_token.as_deref().unwrap_or(access_token);
+        return quota::fetch_quota_zai(token_for_api, email, account_id).await;
+    }
+
     quota::fetch_quota(access_token, email, account_id).await
 }

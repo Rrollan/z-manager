@@ -301,7 +301,22 @@
       "oauth_error": "OAuth failed: {{error}}",
       "status": {
         "error_token": "Please enter Refresh Token"
-      }
+      },
+      "tab_auto": "Auto Login",
+      "tab_manual": "Manual Entry",
+      "auto_how_works": "How it works",
+      "auto_hint": "Clicking Confirm opens a secure, resizable window pointing to Z.ai. After you log in manually, Z Manager will securely capture your session token automatically and configure the account.",
+      "manual_how_works": "Manual Process",
+      "manual_hint": "Log in to Z.ai using your default web browser, copy your session token (JWT) or generate an API Key, and paste it below.",
+      "open_browser": "Open Z.ai in Browser",
+      "manual_token_label": "Session Token or API Key",
+      "btn_save": "Save",
+      "token_required": "Token or API key is required",
+      "saving": "Validating and saving account...",
+      "added": "Added account",
+      "auto_waiting": "Please log in inside the new Z.ai window...",
+      "waiting": "Waiting...",
+      "saving_btn": "Saving..."
     },
     "table": {
       "email": "Email",
@@ -359,7 +374,7 @@
       "auto_launch": "Launch at Startup",
       "auto_launch_enabled": "Enabled",
       "auto_launch_disabled": "Disabled",
-      "auto_launch_desc": "Automatically launch Antigravity Tools when system starts",
+      "auto_launch_desc": "Automatically launch Z Manager when system starts",
       "auto_check_update": "Auto Check for Updates",
       "auto_check_update_desc": "Automatically check for new versions on startup",
       "auto_check_update_enabled": "Auto check enabled",
@@ -615,7 +630,7 @@
       "long_prompt_warning": "Prompt is quite long (over 2000 chars) and may consume significant context space."
     },
     "branding": {
-      "title": "Antigravity Tools",
+      "title": "Z Manager",
       "subtitle": "Professional Account Management"
     }
   },

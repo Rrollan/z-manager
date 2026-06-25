@@ -55,7 +55,7 @@ const PinnedQuotaModels = ({ config, onChange }: PinnedQuotaModelsProps) => {
         .map(([id, cfg]) => ({
             id,
             label: id,
-            desc: cfg.shortLabel || cfg.label || t(cfg.i18nDescKey || cfg.i18nKey, cfg.label)
+            desc: cfg.shortLabel || cfg.label || (cfg.i18nDescKey || cfg.i18nKey ? t((cfg.i18nDescKey || cfg.i18nKey) as string, cfg.label) : cfg.label)
         }));
 
     // 提取所有账号的历史动态模型

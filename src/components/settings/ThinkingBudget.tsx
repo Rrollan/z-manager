@@ -125,7 +125,7 @@ export default function ThinkingBudget({
                         </div>
                         <p className="text-[10px] text-purple-600 dark:text-purple-400/80">
                             {t("settings.thinking_budget.adaptive_hint", {
-                                defaultValue: "自适应模式：由模型根据任务复杂度自动调整思考量。Claude 4.6+ 推荐使用此模式。",
+                                defaultValue: "自适应模式：由模型根据任务复杂度自动调整思考量。Claude 3.5 Sonnet+ 推荐使用此模式。",
                             })}
                         </p>
                     </div>

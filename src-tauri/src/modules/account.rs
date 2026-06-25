@@ -418,7 +418,7 @@ mod tests {
 static ACCOUNT_INDEX_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 // ... existing constants ...
-const DATA_DIR: &str = ".antigravity_tools";
+const DATA_DIR: &str = ".z_manager";
 const ACCOUNTS_INDEX: &str = "accounts.json";
 const ACCOUNTS_DIR: &str = "accounts";
 
@@ -1802,6 +1802,19 @@ pub async fn fetch_quota_with_retry(account: &mut Account) -> crate::error::AppR
     if let Err(AppError::Network(_, status)) = result {
         if let Some(code) = status {
             if code == 401 {
+                if account.email.ends_with("(Z.ai)") || account.token.access_token == account.token.refresh_token {
+                    modules::logger::log_warn(&format!(
+                        "401 Unauthorized for Z.ai account {}, marking as invalid (no auto-refresh).",
+                        account.email
+                    ));
+                    account.disabled = true;
+                    account.disabled_at = Some(chrono::Utc::now().timestamp());
+                    account.disabled_reason = Some("invalid_grant: Z.ai token expired. Please login again.".to_string());
+                    let _ = save_account(account);
+                    crate::proxy::server::trigger_account_reload(&account.id);
+                    return Err(AppError::OAuth("Z.ai session expired. Please re-login.".to_string()));
+                }
+
                 modules::logger::log_warn(&format!(
                     "401 Unauthorized for {}, forcing refresh...",
                     account.email

@@ -555,6 +555,14 @@ pub struct ProxyConfig {
     /// 代理池配置
     #[serde(default)]
     pub proxy_pool: ProxyPoolConfig,
+
+    /// 是否启用自动切换额度将耗尽的账号
+    #[serde(default = "default_auto_switch_enabled")]
+    pub auto_switch_enabled: bool,
+
+    /// 自动切换的额度使用率阈值（%）
+    #[serde(default = "default_auto_switch_threshold")]
+    pub auto_switch_threshold: u32,
 }
 
 /// 上游代理配置
@@ -592,12 +600,22 @@ impl Default for ProxyConfig {
             global_system_prompt: GlobalSystemPromptConfig::default(),
             proxy_pool: ProxyPoolConfig::default(),
             image_thinking_mode: None,
+            auto_switch_enabled: true,
+            auto_switch_threshold: 90,
         }
     }
 }
 
 fn default_request_timeout() -> u64 {
     120 // 默认 120 秒,原来 60 秒太短
+}
+
+fn default_auto_switch_enabled() -> bool {
+    true
+}
+
+fn default_auto_switch_threshold() -> u32 {
+    90
 }
 
 fn default_zai_base_url() -> String {

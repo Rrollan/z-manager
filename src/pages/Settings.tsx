@@ -53,7 +53,9 @@ function Settings() {
                 auto_failover: true,
                 strategy: 'priority',
                 account_bindings: {}
-            }
+            },
+            auto_switch_enabled: true,
+            auto_switch_threshold: 90,
         },
         scheduled_warmup: {
             enabled: false,
@@ -85,7 +87,7 @@ function Settings() {
     // Dialog state
     const [isClearLogsOpen, setIsClearLogsOpen] = useState(false);
     const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
-    const [dataDirPath, setDataDirPath] = useState<string>('~/.antigravity_tools/');
+    const [dataDirPath, setDataDirPath] = useState<string>('~/.z_manager/');
 
     // Antigravity cache clearing state
     const [isClearCacheOpen, setIsClearCacheOpen] = useState(false);
@@ -1283,6 +1285,73 @@ function Settings() {
                                                     {t('proxy.config.upstream_proxy.socks5h_hint')}
                                                 </div>
                                             </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Z.ai Auto-switching settings */}
+                            <div className="group bg-white dark:bg-base-100 rounded-xl p-5 border border-gray-100 dark:border-base-200 hover:border-blue-200 transition-all duration-300 shadow-sm relative overflow-hidden">
+                                <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 -mr-12 -mt-12 rounded-full blur-2xl group-hover:bg-blue-500/10 transition-colors"></div>
+                                <div className="flex items-center justify-between mb-5 relative z-10">
+                                    <div className="flex items-center gap-4">
+                                        <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center text-blue-500 group-hover:bg-blue-500 group-hover:text-white transition-all duration-300 shadow-sm animate-pulse">
+                                            <RefreshCw size={18} />
+                                        </div>
+                                        <div>
+                                            <div className="font-bold text-gray-900 dark:text-gray-100 text-sm">Z.ai Auto-Switching</div>
+                                            <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 leading-tight max-w-[280px]">
+                                                Automatically switch to the best account (lowest usage) when the active account's limit is close to exhaustion.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <label className="relative inline-flex items-center cursor-pointer scale-90">
+                                        <input
+                                            type="checkbox"
+                                            className="sr-only peer"
+                                            checked={formData.proxy?.auto_switch_enabled ?? true}
+                                            onChange={(e) => setFormData({
+                                                ...formData,
+                                                proxy: {
+                                                    ...formData.proxy,
+                                                    auto_switch_enabled: e.target.checked
+                                                }
+                                            })}
+                                        />
+                                        <div className="w-11 h-6 bg-gray-200 dark:bg-base-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500 shadow-inner"></div>
+                                    </label>
+                                </div>
+
+                                {(formData.proxy?.auto_switch_enabled ?? true) && (
+                                    <div className="space-y-4 animate-in slide-in-from-top-2 duration-300 relative z-10">
+                                        <div className="pt-4 border-t border-gray-50 dark:border-base-300">
+                                            <div className="flex justify-between items-center mb-2.5">
+                                                <label className="block text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest">
+                                                    Usage Threshold (%)
+                                                </label>
+                                                <span className="text-xs font-bold text-blue-500 bg-blue-50 dark:bg-blue-950/30 px-2 py-0.5 rounded-md">
+                                                    {formData.proxy?.auto_switch_threshold ?? 90}%
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <input
+                                                    type="range"
+                                                    min="50"
+                                                    max="99"
+                                                    className="range range-xs range-primary flex-1"
+                                                    value={formData.proxy?.auto_switch_threshold ?? 90}
+                                                    onChange={(e) => setFormData({
+                                                        ...formData,
+                                                        proxy: {
+                                                            ...formData.proxy,
+                                                            auto_switch_threshold: parseInt(e.target.value)
+                                                        }
+                                                    })}
+                                                />
+                                            </div>
+                                            <p className="text-[10px] text-gray-400 mt-2">
+                                                Recommended: 85% - 95%. When an used percentage of quota is reached, proxy will switch credentials.
+                                            </p>
                                         </div>
                                     </div>
                                 )}

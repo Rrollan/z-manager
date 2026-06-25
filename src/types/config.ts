@@ -25,6 +25,8 @@ export interface ProxyConfig {
     global_system_prompt?: GlobalSystemPromptConfig;
     image_thinking_mode?: 'enabled' | 'disabled'; // [NEW] 图像思维模式开关
     proxy_pool?: ProxyPoolConfig;
+    auto_switch_enabled?: boolean;
+    auto_switch_threshold?: number;
 }
 
 // ============================================================================

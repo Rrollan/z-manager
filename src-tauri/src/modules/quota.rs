@@ -252,282 +252,289 @@ pub async fn fetch_quota(
     fetch_quota_with_cache(access_token, email, None, account_id).await
 }
 
-/// Fetch quota with cache support
-pub async fn fetch_quota_with_cache(
-    access_token: &str,
+/// Fetch quota for Z.ai accounts using the ZCode billing/balance API
+/// This uses the same API that ZCode IDE uses internally
+pub async fn fetch_quota_zai(
+    id_token: &str,
     email: &str,
-    cached_project_id: Option<&str>,
     account_id: Option<&str>,
 ) -> crate::error::AppResult<(QuotaData, Option<String>)> {
     use crate::error::AppError;
-
-    // Optimization: Skip loadCodeAssist call if project_id is cached to save API quota
-    let (project_id, subscription_tier) = if let Some(pid) = cached_project_id {
-        (Some(pid.to_string()), None)
-    } else {
-        fetch_project_id(access_token, email, account_id).await
-    };
-
-    // We keep project_id to store in the DB, but we NO LONGER force inject it into payload if it's absent
-
+    
     let client = create_standard_client(account_id).await;
-    let payload = if let Some(ref pid) = project_id {
-        json!({ "project": pid })
-    } else {
-        json!({}) // Empty payload fallback
-    };
-
-    let mut last_error: Option<AppError> = None;
-
-    for (ep_idx, ep_url) in QUOTA_API_ENDPOINTS.iter().enumerate() {
-        let has_next = ep_idx + 1 < QUOTA_API_ENDPOINTS.len();
-
-        let mut current_payload = payload.clone();
-        let mut retry_without_project = false;
-
-        loop {
-            match client
-                .post(*ep_url)
-                .bearer_auth(access_token)
-                .header(
-                    rquest::header::USER_AGENT,
-                    crate::constants::NATIVE_OAUTH_USER_AGENT.as_str(),
-                )
-                .json(&current_payload)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    // Convert HTTP error status to AppError
-                    if let Err(_) = response.error_for_status_ref() {
-                        let status = response.status();
-
-                        // [FIX] 403 Forbidden 处理：如果是带有 project_id 的请求，尝试剥离后重试
-                        if status == rquest::StatusCode::FORBIDDEN {
-                            if current_payload.get("project").is_some() && !retry_without_project {
-                                crate::modules::logger::log_warn(&format!(
-                                    "Quota fetch got 403 with project ID, retrying without project ID..."
-                                ));
-                                current_payload = json!({});
-                                retry_without_project = true;
-                                continue;
-                            }
-
-                            crate::modules::logger::log_warn(&format!(
-                                "Account unauthorized (403 Forbidden), marking as forbidden"
-                            ));
-                            let mut q = QuotaData::new();
-                            q.is_forbidden = true;
-                            q.subscription_tier = subscription_tier.clone();
-                            return Ok((q, project_id.clone()));
-                        }
-
-                        let text = response.text().await.unwrap_or_default();
-
-                        // 429/5xx: fallback to next endpoint
-                        if has_next
-                            && (status == rquest::StatusCode::TOO_MANY_REQUESTS
-                                || status.is_server_error())
-                        {
-                            crate::modules::logger::log_warn(&format!(
-                                "Quota API {} returned {}, falling back to next endpoint",
-                                ep_url, status
-                            ));
-                            last_error =
-                                Some(AppError::Unknown(format!("HTTP {} - {}", status, text)));
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                            break; // Break the inner retry loop, continue to next endpoint
-                        }
-
-                        return Err(AppError::Unknown(format!(
-                            "API Error: {} - {}",
-                            status, text
-                        )));
-                    }
-
-                    if ep_idx > 0 {
-                        crate::modules::logger::log_info(&format!(
-                            "Quota API fallback succeeded at endpoint #{}",
-                            ep_idx + 1
-                        ));
-                    }
-
-                    let quota_response: QuotaResponse =
-                        response.json().await.map_err(AppError::from)?;
-
-                    let mut quota_data = QuotaData::new();
-
-                    // Use debug level for detailed info to avoid console noise
-                    tracing::debug!("Quota API returned {} models", quota_response.models.len());
-
-                    for (name, info) in quota_response.models {
-                        if let Some(quota_info) = info.quota_info {
-                            let percentage = quota_info
-                                .remaining_fraction
-                                .map(|f| (f * 100.0) as i32)
-                                .unwrap_or(0);
-
-                            let reset_time = quota_info.reset_time.clone().unwrap_or_default();
-
-                            // Only keep models we care about (exclude internal chat models)
-                            if name.starts_with("gemini")
-                                || name.starts_with("claude")
-                                || name.starts_with("gpt")
-                                || name.starts_with("image")
-                                || name.starts_with("imagen")
-                            {
-                                let model_quota = crate::models::quota::ModelQuota {
-                                    name,
-                                    percentage,
-                                    reset_time,
-                                    display_name: info.display_name,
-                                    supports_images: info.supports_images,
-                                    supports_thinking: info.supports_thinking,
-                                    thinking_budget: info.thinking_budget,
-                                    recommended: info.recommended,
-                                    max_tokens: info.max_tokens,
-                                    max_output_tokens: info.max_output_tokens,
-                                    supported_mime_types: info.supported_mime_types,
-                                };
-                                quota_data.add_model(model_quota);
-                            }
-                        }
-                    }
-
-                    // Parse deprecated model routing rules
-                    if let Some(deprecated) = quota_response.deprecated_model_ids {
-                        for (old_id, info) in deprecated {
-                            quota_data
-                                .model_forwarding_rules
-                                .insert(old_id, info.new_model_id);
-                        }
-                    }
-
-                    // Set subscription tier
-                    quota_data.subscription_tier = subscription_tier.clone();
-
-                    // Best-effort: fetch grouped quota summary (weekly + 5h windows).
-                    // Failure here must not block the primary quota result.
-                    quota_data.quota_groups =
-                        fetch_quota_summary(access_token, email, project_id.as_deref(), account_id)
-                            .await;
-
-                    return Ok((quota_data, project_id.clone()));
-                }
-                Err(e) => {
-                    crate::modules::logger::log_warn(&format!(
-                        "Quota API request failed at {}: {}",
-                        ep_url, e
-                    ));
-                    last_error = Some(AppError::from(e));
-                    if has_next {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    break; // Break the inner retry loop on network error, continue to next endpoint
-                }
-            }
-        } // End of inner loop
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        AppError::Unknown("Quota fetch failed: all endpoints exhausted".to_string())
-    }))
-}
-
-/// Fetch grouped quota summary (weekly + 5h windows) via retrieveUserQuotaSummary.
-///
-/// Best-effort: returns `None` on any failure so that the primary 5h quota fetch
-/// (fetchAvailableModels) is never blocked by this auxiliary endpoint.
-async fn fetch_quota_summary(
-    access_token: &str,
-    email: &str,
-    project_id: Option<&str>,
-    account_id: Option<&str>,
-) -> Option<Vec<crate::models::quota::QuotaGroup>> {
-    let client = create_standard_client(account_id).await;
-    let payload = if let Some(pid) = project_id {
-        json!({ "project": pid })
-    } else {
-        json!({})
-    };
-
-    for ep_url in QUOTA_SUMMARY_ENDPOINTS.iter() {
-        let res = client
-            .post(*ep_url)
-            .bearer_auth(access_token)
-            .header(
-                rquest::header::USER_AGENT,
-                crate::constants::NATIVE_OAUTH_USER_AGENT.as_str(),
-            )
-            .json(&payload)
-            .send()
-            .await;
-
-        match res {
-            Ok(response) => {
-                let status = response.status();
-                if !status.is_success() {
-                    crate::modules::logger::log_warn(&format!(
-                        "QuotaSummary API {} returned {}, trying next endpoint",
-                        ep_url, status
-                    ));
-                    // 4xx (非 429) 通常所有端点行为一致,直接退出避免无谓重试
-                    if status.is_client_error() && status != rquest::StatusCode::TOO_MANY_REQUESTS {
-                        return None;
-                    }
-                    continue;
-                }
-
-                let summary: QuotaSummaryResponse = match response.json().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        crate::modules::logger::log_warn(&format!(
-                            "QuotaSummary JSON parse failed for {}: {}",
-                            email, e
-                        ));
-                        return None;
-                    }
-                };
-
-                let groups: Vec<crate::models::quota::QuotaGroup> = summary
-                    .groups
-                    .into_iter()
-                    .map(|g| crate::models::quota::QuotaGroup {
-                        display_name: g.display_name.unwrap_or_default(),
-                        description: g.description,
-                        buckets: g
-                            .buckets
-                            .into_iter()
-                            .map(|b| crate::models::quota::QuotaBucket {
-                                bucket_id: b.bucket_id.unwrap_or_default(),
-                                window: b.window.unwrap_or_default(),
-                                remaining_fraction: b.remaining_fraction.unwrap_or(0.0),
-                                reset_time: b.reset_time.unwrap_or_default(),
-                                display_name: b.display_name,
-                                description: b.description,
-                            })
-                            .collect(),
-                    })
-                    .collect();
-
-                tracing::debug!("[{}] QuotaSummary fetched {} groups", email, groups.len());
-                return Some(groups);
-            }
-            Err(e) => {
+    
+    let res = client
+        .get("https://zcode.z.ai/api/v1/zcode-plan/billing/balance?app_version=3.1.5")
+        .bearer_auth(id_token)
+        .header("User-Agent", crate::constants::NATIVE_OAUTH_USER_AGENT.as_str())
+        .send()
+        .await;
+    
+    let mut quota_data = QuotaData::new();
+    
+    match res {
+        Ok(response) => {
+            let status = response.status();
+            
+            if status == rquest::StatusCode::UNAUTHORIZED {
                 crate::modules::logger::log_warn(&format!(
-                    "QuotaSummary API request failed at {}: {}",
-                    ep_url, e
+                    "⚠️ Z.ai billing/balance API returned 401 for {}", email
                 ));
-                continue;
+                return Err(AppError::Unknown("Z.ai billing API: 401 Unauthorized".to_string()));
             }
+            
+            if !status.is_success() {
+                return Err(AppError::Unknown(format!("Z.ai billing API Error: {}", status)));
+            }
+            
+            let body_text = response.text().await
+                .map_err(|e| AppError::Unknown(format!("Failed to read Z.ai billing response: {}", e)))?;
+            
+            let parsed: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|e| AppError::Unknown(format!("Failed to parse Z.ai billing response: {}", e)))?;
+            
+            let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if code != 0 {
+                let msg = parsed.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown error");
+                return Err(AppError::Unknown(format!("Z.ai billing API error: {}", msg)));
+            }
+            
+            // Parse the plan name for subscription tier
+            // Also try to get it from billing/current in the future
+            quota_data.subscription_tier = Some("ZCode Start Plan".to_string());
+            
+            if let Some(balances) = parsed.get("data").and_then(|d| d.get("balances")).and_then(|b| b.as_array()) {
+                for balance in balances {
+                    let show_name = balance.get("show_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let total_units = balance.get("total_units").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let remaining_units = balance.get("remaining_units").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let expires_at = balance.get("expires_at").and_then(|v| v.as_i64()).unwrap_or(0);
+                    
+                    // Calculate percentage as remaining/total * 100 (matching ZCode's display)
+                    let percentage = if total_units > 0 {
+                        ((remaining_units as f64 / total_units as f64) * 100.0).round() as i32
+                    } else {
+                        0
+                    };
+                    
+                    let reset_time = if expires_at > 0 {
+                        chrono::DateTime::from_timestamp(expires_at, 0)
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    
+                    let (is_turbo, model_name) = if show_name.contains("Turbo") || show_name.contains("turbo") {
+                        (true, "glm-5-turbo".to_string())
+                    } else {
+                        (false, "glm-5.2".to_string())
+                    };
+                    
+                    crate::modules::logger::log_info(&format!(
+                        "📊 [Z.ai] {} quota: {}/{} remaining ({}%)",
+                        show_name, remaining_units, total_units, percentage
+                    ));
+                    
+                    quota_data.add_model(crate::models::quota::ModelQuota {
+                        name: model_name,
+                        percentage,
+                        reset_time,
+                        display_name: Some(show_name.to_string()),
+                        supports_images: Some(true),
+                        supports_thinking: Some(!is_turbo),
+                        thinking_budget: if is_turbo { None } else { Some(1024) },
+                        recommended: Some(!is_turbo),
+                        max_tokens: Some(total_units as i32),
+                        max_output_tokens: Some(8192),
+                        supported_mime_types: None,
+                    });
+                }
+            }
+            
+            // Fallback if no balances parsed
+            if quota_data.models.is_empty() {
+                crate::modules::logger::log_warn("⚠️ Z.ai billing/balance returned no balances, using defaults");
+                quota_data.add_model(crate::models::quota::ModelQuota {
+                    name: "glm-5.2".to_string(),
+                    percentage: 100,
+                    reset_time: String::new(),
+                    display_name: Some("GLM-5.2".to_string()),
+                    supports_images: Some(true),
+                    supports_thinking: Some(true),
+                    thinking_budget: Some(1024),
+                    recommended: Some(true),
+                    max_tokens: Some(3000000),
+                    max_output_tokens: Some(8192),
+                    supported_mime_types: None,
+                });
+                quota_data.add_model(crate::models::quota::ModelQuota {
+                    name: "glm-5-turbo".to_string(),
+                    percentage: 100,
+                    reset_time: String::new(),
+                    display_name: Some("GLM-5-Turbo".to_string()),
+                    supports_images: Some(true),
+                    supports_thinking: Some(false),
+                    thinking_budget: None,
+                    recommended: Some(false),
+                    max_tokens: Some(2000000),
+                    max_output_tokens: Some(8192),
+                    supported_mime_types: None,
+                });
+            }
+            
+            return Ok((quota_data, None));
+        }
+        Err(e) => {
+            return Err(AppError::Unknown(format!("Z.ai billing API network error: {}", e)));
         }
     }
-
-    None
 }
 
-/// Internal fetch quota logic
-#[allow(dead_code)]
+/// Fetch quota with cache support
+
+#[derive(Debug, Deserialize)]
+struct ZaiQuotaResponse {
+    code: Option<u16>,
+    level: Option<String>,
+    limits: Option<Vec<ZaiLimit>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZaiLimit {
+    #[serde(rename = "limitType")]
+    limit_type: String,
+    total: Option<u64>,
+    percentage: Option<f64>,
+    #[serde(rename = "nextResetTime")]
+    next_reset_time: Option<u64>,
+}
+
+pub async fn fetch_quota_with_cache(
+    access_token: &str,
+    email: &str,
+    _cached_project_id: Option<&str>,
+    account_id: Option<&str>,
+) -> crate::error::AppResult<(QuotaData, Option<String>)> {
+    use crate::error::AppError;
+    let client = create_standard_client(account_id).await;
+    
+    let res = client
+        .get("https://api.z.ai/api/monitor/usage/quota/limit")
+        .bearer_auth(access_token)
+        .header("User-Agent", crate::constants::NATIVE_OAUTH_USER_AGENT.as_str())
+        .send()
+        .await;
+
+    let mut quota_data = QuotaData::new();
+    
+    match res {
+        Ok(response) => {
+            let status = response.status();
+            
+            if status == rquest::StatusCode::UNAUTHORIZED {
+                return Err(AppError::Unknown(format!("API Error: 401 Unauthorized")));
+            }
+            
+            if !status.is_success() {
+                return Err(AppError::Unknown(format!("API Error: {}", status)));
+            }
+            
+            if let Ok(zai_resp) = response.json::<ZaiQuotaResponse>().await {
+                if zai_resp.code == Some(401) {
+                    return Err(AppError::Network("API Error: 401 Unauthorized".to_string(), Some(401)));
+                }
+                
+                quota_data.subscription_tier = zai_resp.level.clone();
+                
+                let mut has_52 = false;
+                let mut has_turbo = false;
+                
+                if let Some(limits) = zai_resp.limits {
+                    for limit in limits {
+                        if limit.limit_type == "TOKENS_LIMIT" {
+                            let total = limit.total.unwrap_or(0);
+                            let remaining_fraction = limit.percentage.unwrap_or(0.0) / 100.0;
+                            let percentage = limit.percentage.map(|p| p as i32).unwrap_or(0);
+                            
+                            // Guess model based on total tokens standard
+                            if total >= 3000000 || (!has_52 && !has_turbo) {
+                                quota_data.add_model(crate::models::quota::ModelQuota {
+                                    name: "GLM-5.2".to_string(),
+                                    percentage,
+                                    reset_time: limit.next_reset_time.map(|t| t.to_string()).unwrap_or_default(),
+                                    display_name: Some("GLM-5.2".to_string()),
+                                    supports_images: Some(true),
+                                    supports_thinking: Some(true),
+                                    thinking_budget: Some(1024),
+                                    recommended: Some(true),
+                                    max_tokens: Some(3000000),
+                                    max_output_tokens: Some(8192),
+                                    supported_mime_types: None,
+                                });
+                                has_52 = true;
+                            } else {
+                                quota_data.add_model(crate::models::quota::ModelQuota {
+                                    name: "GLM-5-Turbo".to_string(),
+                                    percentage,
+                                    reset_time: limit.next_reset_time.map(|t| t.to_string()).unwrap_or_default(),
+                                    display_name: Some("GLM-5-Turbo".to_string()),
+                                    supports_images: Some(true),
+                                    supports_thinking: Some(false),
+                                    thinking_budget: None,
+                                    recommended: Some(false),
+                                    max_tokens: Some(2000000),
+                                    max_output_tokens: Some(8192),
+                                    supported_mime_types: None,
+                                });
+                                has_turbo = true;
+                            }
+                        }
+                    }
+                }
+                
+                // Fallback if limits didn't match
+                if !has_52 {
+                    quota_data.add_model(crate::models::quota::ModelQuota {
+                        name: "GLM-5.2".to_string(),
+                        percentage: 100,
+                        reset_time: "".to_string(),
+                        display_name: Some("GLM-5.2".to_string()),
+                        supports_images: Some(true),
+                        supports_thinking: Some(true),
+                        thinking_budget: Some(1024),
+                        recommended: Some(true),
+                        max_tokens: Some(3000000),
+                        max_output_tokens: Some(8192),
+                        supported_mime_types: None,
+                    });
+                }
+                if !has_turbo {
+                    quota_data.add_model(crate::models::quota::ModelQuota {
+                        name: "GLM-5-Turbo".to_string(),
+                        percentage: 100,
+                        reset_time: "".to_string(),
+                        display_name: Some("GLM-5-Turbo".to_string()),
+                        supports_images: Some(true),
+                        supports_thinking: Some(false),
+                        thinking_budget: None,
+                        recommended: Some(false),
+                        max_tokens: Some(2000000),
+                        max_output_tokens: Some(8192),
+                        supported_mime_types: None,
+                    });
+                }
+                
+                return Ok((quota_data, None));
+            } else {
+                return Err(AppError::Unknown("Failed to parse Z.ai quota response".to_string()));
+            }
+        }
+        Err(e) => {
+            return Err(AppError::Unknown(format!("Quota API network error: {}", e)));
+        }
+    }
+}
 pub async fn fetch_quota_inner(
     access_token: &str,
     email: &str,

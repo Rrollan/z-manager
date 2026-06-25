@@ -25,26 +25,10 @@ function CurrentAccount({ account, onSwitch }: CurrentAccountProps) {
         );
     }
 
-    const geminiProModel = account.quota?.models
-        .filter(m =>
-            m.name.toLowerCase() === 'gemini-3-pro-high'
-            || m.name.toLowerCase() === 'gemini-3-pro-low'
-            || m.name.toLowerCase() === 'gemini-3.1-pro-high'
-            || m.name.toLowerCase() === 'gemini-3.1-pro-low'
-        )
-        .sort((a, b) => (a.percentage || 0) - (b.percentage || 0))[0];
+    const glm52Model = account.quota?.models.find(m => m.name.toLowerCase() === 'glm-5.2');
+    const glm5TurboModel = account.quota?.models.find(m => m.name.toLowerCase() === 'glm-5-turbo');
 
-    const geminiFlashModel = account.quota?.models.find(m => m.name.toLowerCase() === 'gemini-3-flash');
-
-    const geminiImageModel = account.quota?.models.find(m => m.name.toLowerCase() === 'gemini-3-pro-image');
-
-    const claudeGroupNames = [
-        'claude-opus-4-6-thinking',
-        'claude'
-    ];
-    const claudeModel = account.quota?.models
-        .filter(m => claudeGroupNames.includes(m.name.toLowerCase()))
-        .sort((a, b) => (a.percentage || 0) - (b.percentage || 0))[0];
+    
 
     return (
         <div className="bg-white dark:bg-base-100 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-base-200 h-full flex flex-col">
@@ -94,124 +78,63 @@ function CurrentAccount({ account, onSwitch }: CurrentAccountProps) {
                     )}
                 </div>
 
-                {/* Gemini Pro 配额 */}
-                {geminiProModel && (
+                {/* GLM-5.2 配额 */}
+                {glm52Model && (
                     <div className="space-y-1.5">
                         <div className="flex justify-between items-baseline">
                             <span className="text-xs font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
-                                {(account.protected_models?.includes('gemini-3-pro-high') || account.protected_models?.includes('gemini-3.1-pro-high')) && <Lock className="w-2.5 h-2.5 text-rose-500" />}
-                                Gemini 3.1 Pro
+                                {account.protected_models?.includes('glm') && <Lock className="w-2.5 h-2.5 text-rose-500" />}
+                                GLM-5.2
                             </span>
                             <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(geminiProModel.reset_time).toLocaleString()}`}>
-                                    {geminiProModel.reset_time ? `R: ${formatTimeRemaining(geminiProModel.reset_time)}` : t('common.unknown')}
+                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(glm52Model.reset_time).toLocaleString()}`}>
+                                    {glm52Model.reset_time ? `R: ${formatTimeRemaining(glm52Model.reset_time)}` : t('common.unknown')}
                                 </span>
-                                <span className={`text-xs font-bold ${geminiProModel.percentage >= 50 ? 'text-emerald-600 dark:text-emerald-400' :
-                                    geminiProModel.percentage >= 20 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
+                                <span className={`text-xs font-bold ${glm52Model.percentage >= 50 ? 'text-emerald-600 dark:text-emerald-400' :
+                                    glm52Model.percentage >= 20 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
                                     }`}>
-                                    {geminiProModel.percentage}%
+                                    {glm52Model.percentage > 100 ? (glm52Model.percentage / 1000000) + 'M' : `${glm52Model.percentage}%`}
                                 </span>
                             </div>
                         </div>
                         <div className="w-full bg-gray-100 dark:bg-base-300 rounded-full h-1.5 overflow-hidden">
                             <div
-                                className={`h-full rounded-full transition-all duration-700 ${geminiProModel.percentage >= 50 ? 'bg-gradient-to-r from-emerald-400 to-emerald-500' :
-                                    geminiProModel.percentage >= 20 ? 'bg-gradient-to-r from-amber-400 to-amber-500' :
+                                className={`h-full rounded-full transition-all duration-700 ${glm52Model.percentage >= 50 ? 'bg-gradient-to-r from-emerald-400 to-emerald-500' :
+                                    glm52Model.percentage >= 20 ? 'bg-gradient-to-r from-amber-400 to-amber-500' :
                                         'bg-gradient-to-r from-rose-400 to-rose-500'
                                     }`}
-                                style={{ width: `${geminiProModel.percentage}%` }}
-                            ></div>
-                        </div>
-                    </div>
-                )}
-                {/* Gemini 3 Pro Image 配额 */}
-                {geminiImageModel && (
-                    <div className="space-y-1.5">
-                        <div className="flex justify-between items-baseline">
-                            <span className="text-xs font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
-                                {account.protected_models?.includes('gemini-3-pro-image') && <Lock className="w-2.5 h-2.5 text-rose-500" />}
-                                Gemini 3 Pro Image
-                            </span>
-                            <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(geminiImageModel.reset_time).toLocaleString()}`}>
-                                    {geminiImageModel.reset_time ? `R: ${formatTimeRemaining(geminiImageModel.reset_time)}` : t('common.unknown')}
-                                </span>
-                                <span className={`text-xs font-bold ${geminiImageModel.percentage >= 50 ? 'text-emerald-600 dark:text-emerald-400' :
-                                    geminiImageModel.percentage >= 20 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
-                                    }`}>
-                                    {geminiImageModel.percentage}%
-                                </span>
-                            </div>
-                        </div>
-                        <div className="w-full bg-gray-100 dark:bg-base-300 rounded-full h-1.5 overflow-hidden">
-                            <div
-                                className={`h-full rounded-full transition-all duration-700 ${geminiImageModel.percentage >= 50 ? 'bg-gradient-to-r from-emerald-400 to-emerald-500' :
-                                    geminiImageModel.percentage >= 20 ? 'bg-gradient-to-r from-amber-400 to-amber-500' :
-                                        'bg-gradient-to-r from-rose-400 to-rose-500'
-                                    }`}
-                                style={{ width: `${geminiImageModel.percentage}%` }}
+                                style={{ width: `${Math.min(glm52Model.percentage, 100)}%` }}
                             ></div>
                         </div>
                     </div>
                 )}
 
-                {/* Gemini Flash 配额 */}
-                {geminiFlashModel && (
+                {/* GLM-5-Turbo 配额 */}
+                {glm5TurboModel && (
                     <div className="space-y-1.5">
                         <div className="flex justify-between items-baseline">
                             <span className="text-xs font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
-                                {account.protected_models?.includes('gemini-3-flash') && <Lock className="w-2.5 h-2.5 text-rose-500" />}
-                                Gemini 3 Flash
+                                {account.protected_models?.includes('glm') && <Lock className="w-2.5 h-2.5 text-rose-500" />}
+                                GLM-5-Turbo
                             </span>
                             <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(geminiFlashModel.reset_time).toLocaleString()}`}>
-                                    {geminiFlashModel.reset_time ? `R: ${formatTimeRemaining(geminiFlashModel.reset_time)}` : t('common.unknown')}
+                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(glm5TurboModel.reset_time).toLocaleString()}`}>
+                                    {glm5TurboModel.reset_time ? `R: ${formatTimeRemaining(glm5TurboModel.reset_time)}` : t('common.unknown')}
                                 </span>
-                                <span className={`text-xs font-bold ${geminiFlashModel.percentage >= 50 ? 'text-emerald-600 dark:text-emerald-400' :
-                                    geminiFlashModel.percentage >= 20 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400'
+                                <span className={`text-xs font-bold ${glm5TurboModel.percentage >= 50 ? 'text-cyan-600 dark:text-cyan-400' :
+                                    glm5TurboModel.percentage >= 20 ? 'text-cyan-500 dark:text-cyan-400' : 'text-rose-600 dark:text-rose-400'
                                     }`}>
-                                    {geminiFlashModel.percentage}%
+                                    {glm5TurboModel.percentage > 100 ? (glm5TurboModel.percentage / 1000000) + 'M' : `${glm5TurboModel.percentage}%`}
                                 </span>
                             </div>
                         </div>
                         <div className="w-full bg-gray-100 dark:bg-base-300 rounded-full h-1.5 overflow-hidden">
                             <div
-                                className={`h-full rounded-full transition-all duration-700 ${geminiFlashModel.percentage >= 50 ? 'bg-gradient-to-r from-emerald-400 to-emerald-500' :
-                                    geminiFlashModel.percentage >= 20 ? 'bg-gradient-to-r from-amber-400 to-amber-500' :
+                                className={`h-full rounded-full transition-all duration-700 ${glm5TurboModel.percentage >= 50 ? 'bg-gradient-to-r from-cyan-400 to-cyan-500' :
+                                    glm5TurboModel.percentage >= 20 ? 'bg-gradient-to-r from-cyan-500 to-cyan-400' :
                                         'bg-gradient-to-r from-rose-400 to-rose-500'
                                     }`}
-                                style={{ width: `${geminiFlashModel.percentage}%` }}
-                            ></div>
-                        </div>
-                    </div>
-                )}
-
-                {/* Claude 配额 */}
-                {claudeModel && (
-                    <div className="space-y-1.5">
-                        <div className="flex justify-between items-baseline">
-                            <span className="text-xs font-medium text-gray-600 dark:text-gray-400 flex items-center gap-1">
-                                {account.protected_models?.includes('claude') && <Lock className="w-2.5 h-2.5 text-rose-500" />}
-                                Claude 系列
-                            </span>
-                            <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-gray-400 dark:text-gray-500" title={`${t('accounts.reset_time')}: ${new Date(claudeModel.reset_time).toLocaleString()}`}>
-                                    {claudeModel.reset_time ? `R: ${formatTimeRemaining(claudeModel.reset_time)}` : t('common.unknown')}
-                                </span>
-                                <span className={`text-xs font-bold ${claudeModel.percentage >= 50 ? 'text-cyan-600 dark:text-cyan-400' :
-                                    claudeModel.percentage >= 20 ? 'text-orange-600 dark:text-orange-400' : 'text-rose-600 dark:text-rose-400'
-                                    }`}>
-                                    {claudeModel.percentage}%
-                                </span>
-                            </div>
-                        </div>
-                        <div className="w-full bg-gray-100 dark:bg-base-300 rounded-full h-1.5 overflow-hidden">
-                            <div
-                                className={`h-full rounded-full transition-all duration-700 ${claudeModel.percentage >= 50 ? 'bg-gradient-to-r from-cyan-400 to-cyan-500' :
-                                    claudeModel.percentage >= 20 ? 'bg-gradient-to-r from-orange-400 to-orange-500' :
-                                        'bg-gradient-to-r from-rose-400 to-rose-500'
-                                    }`}
-                                style={{ width: `${claudeModel.percentage}%` }}
+                                style={{ width: `${Math.min(glm5TurboModel.percentage, 100)}%` }}
                             ></div>
                         </div>
                     </div>

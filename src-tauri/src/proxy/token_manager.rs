@@ -1174,6 +1174,84 @@ impl TokenManager {
         }
     }
 
+    /// Check and automatically switch the preferred Z Code account if the current one is close to exhaustion
+    pub async fn check_and_auto_switch_account(&self, target_model: &str) {
+        let config = match crate::modules::config::load_app_config() {
+            Ok(cfg) => cfg,
+            Err(_) => return,
+        };
+
+        if !config.proxy.auto_switch_enabled {
+            return;
+        }
+
+        let threshold = config.proxy.auto_switch_threshold as i32;
+
+        let tokens_snapshot: Vec<ProxyToken> = self.tokens.iter().map(|e| e.value().clone()).collect();
+        if tokens_snapshot.is_empty() {
+            return;
+        }
+
+        let normalized_target = crate::proxy::common::model_mapping::normalize_to_standard_id(target_model)
+            .unwrap_or_else(|| target_model.to_string());
+
+        // Find the best candidate (highest remaining percentage for the target model)
+        let mut best_candidate: Option<ProxyToken> = None;
+        let mut highest_remaining = -1;
+
+        for token in &tokens_snapshot {
+            if let Some(&quota) = token.model_quotas.get(&normalized_target) {
+                if quota > highest_remaining {
+                    highest_remaining = quota;
+                    best_candidate = Some(token.clone());
+                }
+            }
+        }
+
+        let best_token = match best_candidate {
+            Some(t) => t,
+            None => return,
+        };
+
+        let mut preferred = self.preferred_account_id.write().await;
+        
+        let should_switch = if let Some(ref current_id) = *preferred {
+            if let Some(current_token) = tokens_snapshot.iter().find(|t| &t.account_id == current_id) {
+                let current_remaining = current_token.model_quotas.get(&normalized_target).copied().unwrap_or(0);
+                let current_used = 100 - current_remaining;
+                
+                // Switch if current used >= threshold AND the best candidate has strictly more remaining quota (at least 5% more to prevent jitter)
+                current_used >= threshold && highest_remaining > current_remaining + 5
+            } else {
+                true // Current preferred account not found in pool
+            }
+        } else {
+            true // No preferred account set
+        };
+
+        if should_switch {
+            let old_email = preferred.as_ref()
+                .and_then(|id| tokens_snapshot.iter().find(|t| &t.account_id == id))
+                .map(|t| t.email.clone())
+                .unwrap_or_else(|| "None".to_string());
+
+            tracing::info!(
+                "🔄 [Auto-Switch] Switching active account from {} to {} (remaining: {}%) due to limit exhaustion (threshold: {}%)",
+                old_email,
+                best_token.email,
+                highest_remaining,
+                threshold
+            );
+
+            *preferred = Some(best_token.account_id.clone());
+            
+            // Persist the choice to index database
+            if let Err(e) = crate::modules::account::set_current_account_id(&best_token.account_id) {
+                tracing::error!("Failed to persist auto-switched account ID: {}", e);
+            }
+        }
+    }
+
     /// 内部实现：获取 Token 的核心逻辑
     async fn get_token_internal(
         &self,
@@ -1182,6 +1260,9 @@ impl TokenManager {
         session_id: Option<&str>,
         target_model: &str,
     ) -> Result<(String, String, String, String, u64), String> {
+        // Auto-switch account if limits are close to exhaustion
+        self.check_and_auto_switch_account(target_model).await;
+
         let mut tokens_snapshot: Vec<ProxyToken> =
             self.tokens.iter().map(|e| e.value().clone()).collect();
         let mut total = tokens_snapshot.len();

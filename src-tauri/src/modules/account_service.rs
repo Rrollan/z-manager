@@ -6,80 +6,222 @@ pub struct AccountService {
     pub integration: crate::modules::integration::SystemManager,
 }
 
+async fn resolve_token(code_or_token: &str) -> Result<String, String> {
+    let trimmed = code_or_token.trim();
+    
+    // If it's a JWT (contains dots and is long)
+    if trimmed.contains('.') && trimmed.len() > 40 {
+        return Ok(trimmed.to_string());
+    }
+    
+    // If it starts with zcode:// or is a zcode auth URL containing code=
+    let mut captured_state = None;
+    let code = if trimmed.starts_with("zcode://") || trimmed.contains("code=") {
+        if let Ok(url) = url::Url::parse(trimmed) {
+            let mut captured_code = None;
+            if let Some(query) = url.query() {
+                for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+                    if k == "code" {
+                        captured_code = Some(v.into_owned());
+                    } else if k == "state" {
+                        captured_state = Some(v.into_owned());
+                    }
+                }
+            }
+            captured_code.ok_or_else(|| "Failed to find 'code' parameter in ZCode redirect URL".to_string())?
+        } else {
+            // Fallback: simple string splitting if parsing fails
+            if let Some(pos) = trimmed.find("code=") {
+                let code_part = &trimmed[pos + 5..];
+                let end_pos = code_part.find('&').unwrap_or(code_part.len());
+                code_part[..end_pos].to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+    } else {
+        trimmed.to_string()
+    };
+    
+    // If it still looks like an API Key or token (starts with eyJ or has dots or is very long), return it directly
+    if code.contains('.') || code.starts_with("eyJ") || code.len() > 100 {
+        return Ok(code);
+    }
+    
+    modules::logger::log_info(&format!("Exchanging ZCode authorization code for access token..."));
+    
+    let client = reqwest::Client::new();
+    let state_val = captured_state.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+
+    let response = client.post("https://zcode.z.ai/api/v1/oauth/token")
+        .json(&serde_json::json!({
+            "provider": "zai",
+            "code": code,
+            "redirect_uri": "zcode://zai-auth/callback",
+            "state": state_val
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("OAuth token exchange request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("OAuth token exchange failed ({}): {}", status, body));
+    }
+
+    let body_text = response.text().await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    modules::logger::log_info(&format!("Raw ZCode token exchange response: {}", body_text));
+
+    let json: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| format!("Failed to parse response as JSON: {}. Raw body: {}", e, body_text))?;
+
+    // 1. Check code
+    let code_val = json.get("code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    if code_val != 0 {
+        let msg = json.get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown business error");
+        return Err(format!("OAuth token exchange business error ({}): {}", code_val, msg));
+    }
+
+    // 2. Extract zcode_jwt_token (from data.token)
+    let data = json.get("data").ok_or_else(|| format!("Response missing 'data' field. Raw body: {}", body_text))?;
+    
+    let zcode_jwt_token = data.get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("Response 'data' missing 'token' field. Raw body: {}", body_text))?;
+
+    // 3. Extract access_token (replicate ZCode's CY(o) exactly)
+    let access_token = data.get("zai")
+        .and_then(|zai| zai.get("access_token").or_else(|| zai.get("accessToken")))
+        .or_else(|| data.get("bigmodel").and_then(|bm| bm.get("access_token").or_else(|| bm.get("accessToken"))))
+        .or_else(|| data.get("access_token"))
+        .or_else(|| data.get("accessToken"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| zcode_jwt_token.clone());
+
+    Ok(format!("{}|{}", access_token, zcode_jwt_token))
+}
+
 impl AccountService {
     pub fn new(integration: crate::modules::integration::SystemManager) -> Self {
         Self { integration }
     }
 
-    /// 添加账号逻辑
-    pub async fn add_account(&self, refresh_token: &str) -> Result<Account, String> {
-        // [FIX #1583] 生成临时 UUID 作为账号上下文，避免传递 None 导致代理选择异常
-        let temp_account_id = uuid::Uuid::new_v4().to_string();
+    /// 添加 Z.ai 账号逻辑
+    pub async fn add_account(&self, email_input: &str, api_key: &str) -> Result<Account, String> {
+        let resolved_api_key = resolve_token(api_key).await
+            .map_err(|e| format!("Token resolution failed: {}", e))?;
+            
+        // Split combined resolved key (access_token|zcode_jwt_token)
+        let (access_token, zcode_jwt_token) = if resolved_api_key.contains('|') {
+            let parts: Vec<&str> = resolved_api_key.split('|').collect();
+            (parts[0].to_string(), Some(parts[1].to_string()))
+        } else {
+            (resolved_api_key.clone(), Some(resolved_api_key.clone()))
+        };
+            
+        let account_id = uuid::Uuid::new_v4().to_string();
 
-        // 1. 获取 Token (使用临时 ID 确保代理选择有明确上下文)
-        let token_res =
-            modules::oauth::refresh_access_token(refresh_token, Some(&temp_account_id)).await?;
+        let email = if email_input.trim().is_empty() {
+            let masked = if access_token.len() > 12 {
+                format!("{}...{}", &access_token[..6], &access_token[access_token.len()-6..])
+            } else {
+                "zcode_key".to_string()
+            };
+            format!("{} (Z.ai)", masked)
+        } else {
+            email_input.to_string()
+        };
 
-        // 2. 获取用户信息
-        let user_info =
-            modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await?;
+        // 1. 获取 Quota 来验证 API Key 并且获取 Limits
+        // For Z.ai accounts (using JWT), the quota API (which expects an sk- key) will reject it.
+        // So we bypass the quota check and use default values.
+        let (quota_data, _) = if email.ends_with("(Z.ai)") {
+            // Use the ZCode billing/balance API with the id_token (zcode_jwt_token)
+            let zai_token = zcode_jwt_token.as_deref().unwrap_or(&access_token);
+            match modules::quota::fetch_quota_zai(zai_token, &email, Some(&account_id)).await {
+                Ok(result) => result,
+                Err(e) => {
+                    // Fallback to defaults if billing API fails
+                    crate::modules::logger::log_warn(&format!(
+                        "Z.ai billing API failed during add_account, using defaults: {}", e
+                    ));
+                    let mut fallback_quota = crate::models::QuotaData::new();
+                    fallback_quota.subscription_tier = Some("ZCode Start Plan".to_string());
+                    fallback_quota.add_model(crate::models::ModelQuota {
+                        name: "glm-5.2".to_string(),
+                        percentage: 100,
+                        reset_time: String::new(),
+                        display_name: Some("GLM-5.2".to_string()),
+                        supports_images: Some(true),
+                        supports_thinking: Some(true),
+                        thinking_budget: Some(1024),
+                        recommended: Some(true),
+                        max_tokens: Some(3000000),
+                        max_output_tokens: Some(8192),
+                        supported_mime_types: None,
+                    });
+                    fallback_quota.add_model(crate::models::ModelQuota {
+                        name: "glm-5-turbo".to_string(),
+                        percentage: 100,
+                        reset_time: String::new(),
+                        display_name: Some("GLM-5-Turbo".to_string()),
+                        supports_images: Some(true),
+                        supports_thinking: Some(false),
+                        thinking_budget: None,
+                        recommended: Some(false),
+                        max_tokens: Some(2000000),
+                        max_output_tokens: Some(8192),
+                        supported_mime_types: None,
+                    });
+                    (fallback_quota, None)
+                }
+            }
+        } else {
+            modules::quota::fetch_quota(&access_token, &email, Some(&account_id))
+                .await
+                .map_err(|e| format!("Failed to validate Z.ai API key: {}", e))?
+        };
 
-        // 3. 获取项目 ID (尝试)
-        let project_id = crate::proxy::project_resolver::fetch_project_id(&token_res.access_token)
-            .await
-            .ok();
-
-        // 4. 构造 TokenData
+        // 2. 构造 TokenData
         let token = TokenData::new(
-            token_res.access_token.clone(),
-            refresh_token.to_string(),
-            token_res.expires_in,
-            Some(user_info.email.clone()),
-            project_id,
+            access_token.clone(),
+            access_token.clone(),
+            315360000, // 10 years expiry
+            Some(email.clone()),
             None,
-            false, // 个人账号默认不开启 GCP TOS
-            token_res.id_token.clone(),
-        )
-        .with_oauth_client_key(token_res.oauth_client_key.clone());
+            None,
+            false,
+            zcode_jwt_token, // Store ZCode JWT token in id_token
+        );
 
-        // 5. 持久化
-        let mut account =
-            modules::upsert_account(user_info.email.clone(), user_info.get_display_name(), token)?;
+        // 3. 持久化
+        let mut account = modules::upsert_account(email.clone(), Some("Z Code Account".to_string()), token)?;
+        account.quota = Some(quota_data);
 
-        // 6. [NEW] 自动获取配额信息（用于刷新时间排序）
-        let email_for_log = account.email.clone();
-        let access_token = token_res.access_token.clone();
-        match modules::quota::fetch_quota(&access_token, &email_for_log, Some(&account.id)).await {
-            Ok((quota_data, new_project_id)) => {
-                account.quota = Some(quota_data);
-                if let Some(pid) = new_project_id {
-                    account.token.project_id = Some(pid);
-                }
-                // 保存更新后的账号信息
-                if let Err(e) = modules::account::save_account(&account) {
-                    modules::logger::log_warn(&format!(
-                        "[Service] Failed to save quota for {}: {}",
-                        email_for_log, e
-                    ));
-                } else {
-                    modules::logger::log_info(&format!(
-                        "[Service] Fetched quota for new account: {}",
-                        email_for_log
-                    ));
-                }
-            }
-            Err(e) => {
-                modules::logger::log_warn(&format!(
-                    "[Service] Failed to fetch quota for {}: {}",
-                    email_for_log, e
-                ));
-            }
+        if let Err(e) = modules::account::save_account(&account) {
+            modules::logger::log_warn(&format!(
+                "[Service] Failed to save quota for {}: {}",
+                email, e
+            ));
         }
 
         modules::logger::log_info(&format!(
-            "[Service] Added/Updated account: {}",
+            "[Service] Added/Updated Z Code account: {}",
             account.email
         ));
+
+        self.integration.update_tray();
+
         Ok(account)
     }
 
@@ -109,90 +251,33 @@ impl AccountService {
         modules::get_current_account_id()
     }
 
-    // --- OAuth 逻辑 ---
+    // --- OAuth 逻辑 (留作 dummy 占位，避免编译错误) ---
 
     pub async fn prepare_oauth_url(
         &self,
-        oauth_client_key: Option<String>,
+        _oauth_client_key: Option<String>,
     ) -> Result<String, String> {
-        let handle = match &self.integration {
-            modules::integration::SystemManager::Desktop(h) => Some(h.clone()),
-            modules::integration::SystemManager::Headless => None,
-        };
-        modules::oauth_server::prepare_oauth_url(handle, oauth_client_key).await
+        Err("OAuth not supported in Z Code manager".to_string())
     }
 
     pub async fn start_oauth_login(
         &self,
-        oauth_client_key: Option<String>,
+        _oauth_client_key: Option<String>,
     ) -> Result<Account, String> {
-        let handle = match &self.integration {
-            modules::integration::SystemManager::Desktop(h) => Some(h.clone()),
-            modules::integration::SystemManager::Headless => None,
-        };
-        let token_res = modules::oauth_server::start_oauth_flow(handle, oauth_client_key).await?;
-        self.process_oauth_token(token_res).await
+        Err("OAuth not supported in Z Code manager".to_string())
     }
 
     pub async fn complete_oauth_login(&self) -> Result<Account, String> {
-        let handle = match &self.integration {
-            modules::integration::SystemManager::Desktop(h) => Some(h.clone()),
-            modules::integration::SystemManager::Headless => None,
-        };
-        let token_res = modules::oauth_server::complete_oauth_flow(handle).await?;
-        self.process_oauth_token(token_res).await
+        Err("OAuth not supported in Z Code manager".to_string())
     }
 
-    pub fn cancel_oauth_login(&self) {
-        modules::oauth_server::cancel_oauth_flow();
-    }
+    pub fn cancel_oauth_login(&self) {}
 
     pub async fn submit_oauth_code(
         &self,
-        code: String,
-        state: Option<String>,
+        _code: String,
+        _state: Option<String>,
     ) -> Result<(), String> {
-        modules::oauth_server::submit_oauth_code(code, state).await
-    }
-
-    async fn process_oauth_token(
-        &self,
-        token_res: modules::oauth::TokenResponse,
-    ) -> Result<Account, String> {
-        let refresh_token = token_res
-            .refresh_token
-            .ok_or_else(|| "未获取到 Refresh Token。请撤销权限后重试。".to_string())?;
-
-        // [FIX #1583] 生成临时 UUID 作为账号上下文
-        let temp_account_id = uuid::Uuid::new_v4().to_string();
-
-        let user_info =
-            modules::oauth::get_user_info(&token_res.access_token, Some(&temp_account_id)).await?;
-        let project_id = crate::proxy::project_resolver::fetch_project_id(&token_res.access_token)
-            .await
-            .ok();
-
-        let token_data = crate::models::TokenData::new(
-            token_res.access_token,
-            refresh_token,
-            token_res.expires_in,
-            Some(user_info.email.clone()),
-            project_id,
-            None,
-            false, // 默认不开启，由后续逻辑或用户手动调整
-            token_res.id_token,
-        )
-        .with_oauth_client_key(token_res.oauth_client_key.clone());
-
-        let account = modules::upsert_account(
-            user_info.email.clone(),
-            user_info.get_display_name(),
-            token_data,
-        )?;
-
-        // 发送 UI 更新通知 (通过 integration)
-        self.integration.update_tray();
-
-        Ok(account)
+        Err("OAuth not supported in Z Code manager".to_string())
     }
 }
